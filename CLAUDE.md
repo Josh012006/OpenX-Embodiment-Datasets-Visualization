@@ -4,61 +4,92 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Purpose
 
-Visualize the **endpoints distribution** of robot experiments in the [Open X-Embodiment dataset](https://robotics-transformer-x.github.io/) (DeepMind). The project extends DeepMind's provided Colab notebook with endpoint visualization capabilities.
+Visualize the **3D spatial distribution of end-effector (EEF) target positions** across all robot datasets in the [Open X-Embodiment collection](https://robotics-transformer-x.github.io/) (DeepMind). The goal is to show what region of space each robot was trained to operate in, relative to its base.
 
 ## Running the Notebook
 
 This is a **Google Colab-first project** — all development happens in [colabs/Open_X_Embodiment_Datasets.ipynb](colabs/Open_X_Embodiment_Datasets.ipynb). There is no local build or test system.
 
-To run locally (requires Python 3.10; 3.11.12 triggers a known recursion issue in Colab):
+To run locally (requires Python 3.10; 3.11 triggers a known recursion issue with `tfds.load`):
 
 ```bash
-pip install tfds-nightly tensorflow rlds dm-reverb apache-beam Pillow
+pip install tfds-nightly tensorflow plotly ipywidgets Pillow
 jupyter notebook colabs/Open_X_Embodiment_Datasets.ipynb
 ```
 
-For cloud execution, use the Colab badge in the notebook header — datasets stream from `gs://gresearch/robotics/` and do not need local download (~5 TB total if you do download them).
+For cloud execution, use the Colab badge in the notebook header. Dataset specs are streamed from `gs://gresearch/robotics/` (metadata only); endpoint caches are loaded from the cloned repo.
 
 ## Architecture
 
-The single notebook is organized into six sequential sections:
+The single notebook is organized into two sections:
 
-1. **Visualize Datasets** — loads episodes via TFDS and renders them as GIF animations; the primary place to add new visualization logic.
-2. **Endpoint Position Distribution** — *(new)* discovers the EEF position field for every dataset and collects 3D positions for visualization; see details below.
-3. **Download Datasets** — bulk download script (all 50+ datasets); rarely needed.
-4. **Data Loader Example** — minimal step-by-step pipeline showing the RLDS episode → step structure.
-5. **Interleave Multiple Datasets** — combines two datasets with weighted sampling using `tf.data` interleave.
-6. **Trajectory Transformation / Multi-Dataset Combination** — advanced: aligns heterogeneous observation specs and creates fixed-length overlapping trajectories via DM Reverb.
+1. **End Effector Coordinates Fields** — identifies the EEF position field for each dataset, defines `DATASET_EEF_CONFIG` and `DATASET_ROBOT_INFO`.
+2. **Visualize End Effector Positions** — interactive Plotly visualizations (individual and combined), loading from the pre-computed `endpoints_cache/`.
 
 ### Data model
 
-All datasets follow the **RLDS** (Robotics Learning from Demonstrations) spec:
+All datasets follow the **RLDS** spec:
 
 ```
 dataset  →  episodes  →  steps  →  { observation, action, reward, … }
 ```
 
-Observations are typically `image` tensors (uint8, various resolutions). Actions are robot-specific vectors. The notebook normalizes these through spec alignment before interleaving.
+EEF position is stored under different fields per dataset. The notebook handles three extraction strategies:
+
+| Strategy | Config | Use case |
+|---|---|---|
+| Direct | `indices=None, reshape=False` | Field is already a 3D `[x, y, z]` vector |
+| Slice | `indices=slice(i,j), reshape=False` | `[x, y, z]` lives at specific offsets in a larger state vector |
+| Reshape | `indices=slice(i,j), reshape=True` | 16 contiguous values form a 4×4 homogeneous matrix; translation = last column `[:3, 3]` |
+
+### Key data structures
+
+**`DATASET_EEF_CONFIG`** (cell-10) — source of truth for field paths and extraction strategy:
+```python
+{
+    "dataset_name": {
+        "field":   ["key0", "key1"],  # path: step["key0"]["key1"]
+        "indices": slice(0, 3),       # or None
+        "reshape": False              # or True
+    },
+    ...
+}
+```
+
+**`DATASET_ROBOT_INFO`** (cell-11) — robot platform and gripper type per dataset.
+
+**`OPENVLA_DATASETS`** (cell-16) — set of datasets used in OpenVLA training; datasets are tagged accordingly in visualizations.
+
+### Cache workflow
+
+Endpoint arrays are pre-computed and stored as `.npy` files in `endpoints_cache/<dataset_name>.npy`. The notebook clones the repo inside Colab at `/content/OpenX-Embodiment-Datasets-Visualization/` and reads from `endpoints_cache/` via `get_endpoints(dataset_name)`.
 
 ### Key APIs / libraries
 
 | Library | Role |
 |---|---|
-| `tensorflow_datasets` (tfds) | Load 50+ named datasets from GCS |
-| `rlds` | Episode/step utilities, trajectory construction |
-| `dm-reverb` | Structured streaming for trajectory pattern sampling |
-| `tf.data` | Interleaving, batching, prefetching |
-| `PIL` / `IPython.display` | GIF rendering in Colab |
+| `tensorflow_datasets` (tfds) | Read dataset specs and stream data from GCS via `builder_from_directory` |
+| `plotly` | Interactive 3D and 2D scatter plots |
+| `ipywidgets` | Checkbox / radio controls in Colab |
+| `numpy` | Endpoint array storage (`.npy`) and normalization |
 
-### Dataset registry
+### `extract_endpoint` logic
 
-Datasets are identified by name strings (e.g. `"fractal20220817_data"`, `"bridge"`, `"kuka"`). The full list of ~50 names is defined in the **Visualize Datasets** section near the top of the notebook. All datasets are loaded with `split='train[:N]'` to avoid downloading the full corpus during exploration.
+```python
+def extract_endpoint(step, config):
+    data = step
+    for key in config["field"]:
+        data = data[key]
+    data = data.numpy()
 
-### Endpoint Position Distribution section
+    if config["indices"] is not None:
+        data = data[config["indices"]]   # slice first
 
-The EEF position field name varies per dataset. The discovery workflow is:
+    if config["reshape"]:
+        matrix = data.flatten()[:16].reshape(4, 4)
+        return matrix[:3, 3]             # translation column
+    else:
+        return data
+```
 
-1. Run the **spec discovery cell** — it reads metadata only (no data download), identifies the best position field per dataset using this priority: `action/world_vector` → `observation/state`, and prints the Python dict code.
-2. Paste the output into the **`DATASET_EEF_FIELDS` cell** — a static dict mapping each dataset name to a `(key0, key1)` tuple, used as `step[key0][key1]` to retrieve the position tensor.
-
-When extending this section (e.g. adding extraction or visualization cells), always use `DATASET_EEF_FIELDS` as the source of truth for field paths rather than hard-coding field names.
+**Important**: index slicing is always applied before reshape. When adding new datasets with `reshape=True`, set `indices` to the correct sub-range of the state vector containing the 4×4 matrix.

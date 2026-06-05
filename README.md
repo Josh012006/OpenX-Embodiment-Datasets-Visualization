@@ -4,79 +4,86 @@
 
 ## Goal
 
-Visualize the **3D spatial distribution of end-effector target positions** across all 50+ robot datasets in the [Open X-Embodiment collection](https://robotics-transformer-x.github.io/) (DeepMind / Google).
+Visualize the **3D spatial distribution of end-effector target positions** across all robot datasets in the [Open X-Embodiment collection](https://robotics-transformer-x.github.io/) (DeepMind / Google).
 
-Each dataset in Open X-Embodiment records robot demonstrations as sequences of steps. Every step contains the position the robot's end effector (hand/gripper) was commanded to reach, expressed in the robot's world coordinate frame with the robot base as origin. By collecting all these positions across every episode and every step, we can answer:
+Each dataset records robot demonstrations as sequences of steps. Every step contains the position the robot's end effector was commanded to reach, expressed in the robot's world coordinate frame with the robot base as origin. By collecting all these positions across every episode and step, we can answer:
 
 - What region of 3D space was each robot trained to operate in?
 - How do the operational workspaces differ between datasets and robot platforms?
-- Which datasets share compatible spatial distributions, making them good candidates for cross-dataset training?
+- Which datasets share compatible spatial distributions (good candidates for cross-dataset training)?
 
 ## Dataset
 
-The [Open X-Embodiment dataset](https://robotics-transformer-x.github.io/) aggregates demonstrations from 22 robot embodiments across 21 institutions. All datasets are hosted publicly on Google Cloud Storage at `gs://gresearch/robotics/` and follow the **RLDS** (Robotics Learning from Demonstrations) format:
+The [Open X-Embodiment dataset](https://robotics-transformer-x.github.io/) aggregates demonstrations from 22 robot embodiments across 21 institutions, all following the **RLDS** format:
 
 ```
 dataset → episodes → steps → { observation, action, reward, is_first, is_last, … }
 ```
 
-The full corpus is ~5 TB. This project streams data directly from GCS — no local download required.
+All datasets are hosted on Google Cloud Storage at `gs://gresearch/robotics/` (~5 TB total). This project streams data directly from GCS — no local download required for visualization.
 
 ## Notebook Structure
 
-All work lives in [colabs/Open_X_Embodiment_Datasets.ipynb](colabs/Open_X_Embodiment_Datasets.ipynb). The notebook is organized into six sections:
+All work lives in [colabs/Open_X_Embodiment_Datasets.ipynb](colabs/Open_X_Embodiment_Datasets.ipynb), organized into two sections:
 
-| # | Section | Description |
-|---|---|---|
-| 1 | **Visualize Datasets** | Loads episodes via TFDS and renders them as GIF animations |
-| 2 | **Endpoint Position Distribution** | *(new)* Discovers and maps the EEF position field for each dataset, then extracts positions for 3D visualization |
-| 3 | **Download Datasets** | Bulk download script for local use (~5 TB); rarely needed |
-| 4 | **Data Loader Example** | Minimal RLDS episode → step pipeline with batching |
-| 5 | **Interleave Multiple Datasets** | Combines two datasets with weighted sampling via `tf.data` |
-| 6 | **Trajectory Transformation** | Aligns heterogeneous specs and produces fixed-length overlapping trajectories via DM Reverb |
+### 1 — End Effector Coordinates Fields
 
-### Section 2 in detail — Endpoint Position Distribution
+Identifies and documents the EEF position field for each supported dataset.
 
-Because each dataset uses a different schema, the EEF position is stored under different field names. Section 2 handles this in two steps:
+- **Feature exploration cell** — connects to GCS (metadata only, no data download) and prints the full feature spec of every dataset, used to identify the correct field paths.
+- **`DATASET_EEF_CONFIG`** — static dict mapping each dataset name to its extraction config:
+  ```python
+  "kuka": {
+      "field":   ["observation", "clip_function_input/base_pose_tool_reached"],
+      "indices": slice(0, 3),   # extract [x, y, z] from a larger vector
+      "reshape": False
+  }
+  ```
+  Three extraction strategies are supported:
+  - **Direct** (`indices=None, reshape=False`) — field is already a 3D vector
+  - **Slice** (`indices=slice(i,j), reshape=False`) — [x,y,z] lives at specific indices
+  - **Reshape** (`indices=slice(i,j), reshape=True`) — 16 values form a 4×4 homogeneous matrix; translation is extracted from the last column
 
-**Step 1 — Spec discovery** (`DATASET_EEF_FIELDS` generation)
+- **`DATASET_ROBOT_INFO`** — maps each dataset to its robot platform and gripper type, used to label visualizations.
 
-Reads only the metadata (no data download) of all 53 datasets and finds the best field for EEF position using this priority order:
+### 2 — Visualize End Effector Positions
 
-1. `action/world_vector` — explicit 3D target position, used by most RT-X datasets
-2. `observation/state` — robot state vector whose first three values are conventionally `[x, y, z]`
+Interactive Plotly-based visualizations, powered by pre-computed endpoint caches.
 
-Prints a ready-to-paste Python dict.
+#### Cache workflow
 
-**Step 2 — Static field mapping**
+Endpoints for all datasets are pre-extracted and stored as `.npy` files in `endpoints_cache/`. The notebook clones this repository inside Colab and reads from that directory — no extraction computation is needed at visualization time.
 
-`DATASET_EEF_FIELDS` is a static dict (analogous to the `DATASETS` list) that stores the key path per dataset:
+#### Individual visualization
 
-```python
-DATASET_EEF_FIELDS = {
-    'fractal20220817_data': ('action', 'world_vector'),
-    'kuka':                 ('action', 'world_vector'),
-    'bridge':               ('observation', 'state'),
-    # …
-}
-```
+Select any dataset by name (`DATASET_NAME` variable) and explore its endpoint distribution interactively:
+- **3D scatter** or **2D projections** (XY, XZ, YZ)
+- **Normalize** toggle (scales each axis 0→1 for shape comparison)
+- Robot base is marked at the origin (0, 0, 0)
+- Title shows the robot platform and whether the dataset is part of **OpenVLA** training data
 
-Usage: `step[key0][key1]` gives the position tensor for any dataset.
+#### Combined visualization
+
+Compare multiple datasets simultaneously on the same plot:
+- Checkbox panel to select any combination of datasets
+- Each dataset gets a distinct color
+- Same 3D / 2D / normalize controls as individual mode
+- Datasets are tagged as **✅ OpenVLA** (used in OpenVLA training) or **🔵 OOD** (out-of-distribution)
 
 ## Running the Notebook
 
 ### Google Colab (recommended)
 
-Click the badge at the top of this file. Datasets stream from GCS — no setup required.
+Click the badge at the top. The notebook clones this repo inside Colab to access the endpoint cache — no GCS access needed for visualization.
 
-> **Python version**: Colab's default runtime is Python 3.11. The `tfds.load` download cells require Python 3.10 due to a [known recursion bug](https://github.com/tensorflow/datasets/issues/4666). The streaming path (`builder_from_directory`) works on 3.11.
+> **Note**: The feature exploration cell (which reads dataset specs from GCS) requires GCS access but downloads no data.
 
 ### Local
 
-Requires Python 3.10:
+Requires Python 3.10 (3.11 has a known recursion issue with `tfds.load`):
 
 ```bash
-pip install tfds-nightly tensorflow rlds dm-reverb apache-beam Pillow matplotlib
+pip install tfds-nightly tensorflow plotly ipywidgets Pillow
 jupyter notebook colabs/Open_X_Embodiment_Datasets.ipynb
 ```
 
@@ -84,9 +91,8 @@ jupyter notebook colabs/Open_X_Embodiment_Datasets.ipynb
 
 | Library | Role |
 |---|---|
-| `tensorflow_datasets` (tfds) | Load 50+ datasets from GCS via `builder_from_directory` |
-| `rlds` | Episode/step utilities, trajectory construction |
-| `dm-reverb` | Structured streaming for fixed-length trajectory sampling |
-| `tf.data` | Interleaving, batching, prefetching |
-| `matplotlib` | 3D scatter plots of EEF position distributions |
-| `PIL` / `IPython.display` | GIF rendering in Colab |
+| `tensorflow_datasets` (tfds) | Read dataset specs and stream data from GCS |
+| `plotly` | Interactive 3D and 2D scatter plots |
+| `ipywidgets` | Checkbox / radio controls in Colab |
+| `numpy` | Endpoint array storage and normalization |
+| `PIL` | Image handling |

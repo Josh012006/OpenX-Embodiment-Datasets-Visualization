@@ -23,8 +23,8 @@ For cloud execution, use the Colab badge in the notebook header. Dataset specs a
 
 The single notebook is organized into two sections:
 
-1. **End Effector Coordinates Fields** — identifies the EEF position field for each dataset, defines `DATASET_EEF_CONFIG` and `DATASET_ROBOT_INFO`.
-2. **Visualize End Effector Positions** — interactive Plotly visualizations (individual and combined), loading from the pre-computed `endpoints_cache/`.
+1. **Datasets Infos** (cell-6) — identifies the EEF position field for each dataset, defines `DATASET_EEF_CONFIG` and `DATASET_ROBOT_INFO`.
+2. **Visualize End Effector Positions** (cell-14) — cache generation, helpers, and interactive Plotly visualizations (individual and combined).
 
 ### Data model
 
@@ -40,7 +40,8 @@ EEF position is stored under different fields per dataset. The notebook handles 
 |---|---|---|
 | Direct | `indices=None, reshape=False` | Field is already a 3D `[x, y, z]` vector |
 | Slice | `indices=slice(i,j), reshape=False` | `[x, y, z]` lives at specific offsets in a larger state vector |
-| Reshape | `indices=slice(i,j), reshape=True` | 16 contiguous values form a 4×4 homogeneous matrix; translation extracted from it |
+| Reshape (row) | `reshape=True` (default) | 16 values → 4×4 matrix, returns `matrix[3, :3]` (last row) |
+| Reshape (col) | `reshape=True, reshape_convention="col"` | 16 values → 4×4 matrix, returns `matrix[:3, 3]` (translation column) |
 
 ### Key data structures
 
@@ -48,9 +49,10 @@ EEF position is stored under different fields per dataset. The notebook handles 
 ```python
 {
     "dataset_name": {
-        "field":   ["key0", "key1"],  # path: step["key0"]["key1"]
-        "indices": slice(0, 3),       # or None; applied before reshape
-        "reshape": False              # or True
+        "field":              ["key0", "key1"],  # path: step["key0"]["key1"]
+        "indices":            slice(0, 3),        # or None; always applied before reshape
+        "reshape":            False,              # or True
+        "reshape_convention": "col"              # optional; "row" (default) or "col"
     },
     ...
 }
@@ -62,17 +64,27 @@ Most datasets use `step["observation"][field_name]`, but two exceptions exist:
 
 **`DATASET_ROBOT_INFO`** (cell-13) — robot platform and gripper type per dataset. Covers the same 33 datasets as `DATASET_EEF_CONFIG`.
 
-**`OPENVLA_DATASETS`** (cell-18) — set of 15 datasets used in OpenVLA training; tagged `✅ OpenVLA` in visualizations. All others are tagged `🔵 OOD`.
+**`OPENVLA_DATASETS`** (cell-19) — set of 15 datasets used in OpenVLA training; tagged `✅ OpenVLA` in visualizations. All others are tagged `🔵 OOD`.
 
 ### Cache workflow
 
-Endpoint arrays are pre-computed and stored as `.npy` files in `endpoints_cache/<dataset_name>.npy`. The notebook clones the repo inside Colab at `/content/OpenX-Embodiment-Datasets-Visualization/` and reads from `endpoints_cache/` via `get_endpoints(dataset_name)`.
+The cache stores **one point per episode** — the EEF position at the **last step** of each episode. Arrays are saved as `endpoints_cache/<dataset_name>.npy` (shape `(n_episodes, 3)`).
+
+The `load_dataset` function (cell-18) generates missing cache files:
+1. Skips datasets already on disk
+2. Loads up to 500 episodes via `get_safe_split(b, max_episodes=500)`
+3. Iterates through steps to find the last one, calls `extract_endpoint`
+4. Saves the collected `(n, 3)` array as `.npy`
+5. Calls `gc.collect()` and `tf.keras.backend.clear_session()` between datasets
+
+The notebook clones the repo inside Colab at `/content/OpenX-Embodiment-Datasets-Visualization/` and reads from `endpoints_cache/` via `get_endpoints(dataset_name)`.
 
 ### Key APIs / libraries
 
 | Library | Role |
 |---|---|
 | `tensorflow_datasets` (tfds) | Read dataset specs from GCS via `builder_from_directory` |
+| `tensorflow` / `gc` | Memory management during cache generation |
 | `plotly` | Interactive 3D and 2D scatter plots |
 | `ipywidgets` | Checkbox / radio controls in Colab |
 | `numpy` | Endpoint array storage (`.npy`) and normalization |
@@ -94,31 +106,34 @@ def extract_endpoint(step, config):
         flat = data.flatten()
         if len(flat) >= 16:
             matrix = flat[:16].reshape(4, 4)
-            return matrix[3, :3]         # last row, first 3 columns
+            convention = config.get("reshape_convention", "row")
+            if convention == "col":
+                return matrix[:3, 3]     # translation column (standard homogeneous)
+            else:
+                return matrix[3, :3]     # last row, first 3 elements (default)
         else:
-            raise ValueError(...)
+            raise ValueError(f"Cannot reshape data of size {len(flat)} into 4x4 matrix")
     else:
         return data
 ```
 
-> ⚠️ **Note on reshape extraction**: The current code uses `matrix[3, :3]` (last row, columns 0–2). For a standard 4×4 homogeneous transformation matrix the translation lives in the **last column** (`matrix[:3, 3]`), not the last row. Verify this is correct for your datasets before computing new endpoint caches.
+**Important invariant**: index slicing is always applied before reshape. When adding new datasets with `reshape=True`, set `indices` to the exact sub-range of the state vector containing the 16 matrix values, and set `reshape_convention` to `"col"` if the data uses a standard homogeneous matrix layout.
 
-**Important invariant**: index slicing is always applied before reshape. When adding new datasets with `reshape=True`, set `indices` to the exact sub-range of the state vector containing the 16 matrix values.
-
-### Visualization helpers (cell-18)
+### Visualization helpers (cell-19)
 
 **`make_base_marker_3d(scale=0.1)`** — returns a list of Plotly traces representing the robot base:
 - Three colored line segments from origin: X axis (red), Y axis (green), Z axis (blue)
 - One marker+text trace at (0, 0, 0) labelled "Base"
 
-**`build_figure(endpoints, dataset_name, view, normalize_flag, color)`** — creates the full Plotly figure for a single dataset. `view` is one of `'3D'`, `'XY'`, `'XZ'`, `'YZ'`.
+**`build_figure(endpoints, dataset_name, view, normalize_flag, color)`** — creates the full Plotly figure for a single dataset. `view` is one of `'3D'`, `'XY'`, `'XZ'`, `'YZ'`. Title includes `n=<episode_count>`.
 
 **`normalize(endpoints)`** — min-max normalization per axis, clamps range to 1 if an axis has zero variance.
 
 ### Adding a new dataset
 
 1. Run the feature exploration cell (cell-11) to find the field that holds the EEF position.
-2. Add an entry to `DATASET_EEF_CONFIG` (cell-12) with the correct `field`, `indices`, and `reshape`.
+2. Add an entry to `DATASET_EEF_CONFIG` (cell-12) with the correct `field`, `indices`, `reshape`, and optionally `reshape_convention`.
 3. Add an entry to `DATASET_ROBOT_INFO` (cell-13) with the robot name and gripper type.
-4. Pre-compute the endpoint array and save it as `endpoints_cache/<dataset_name>.npy`.
-5. If the dataset is in OpenVLA training data, add it to `OPENVLA_DATASETS` (cell-18).
+4. Run the cache generation cell (cell-18) — it will detect the missing `.npy` and generate it automatically.
+5. Commit the new `endpoints_cache/<dataset_name>.npy` file.
+6. If the dataset is in OpenVLA training data, add it to `OPENVLA_DATASETS` (cell-19).

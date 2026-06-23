@@ -1,0 +1,22 @@
+[
+  "bound backward fast",
+  "bound backward slowly",
+  "bound forward fast",
+  "bound forward slowly",
+  "bound in place",
+  "move backward fast in pacing gait",
+  "move backward slowly in pacing gait",
+  "move forward fast in pacing gait",
+  "move forward slowly in pacing gait",
+  "pace in place",
+  "raise your front left leg",
+  "raise your front right leg",
+  "raise your rear left leg",
+  "raise your rear right leg",
+  "stand still",
+  "trot backward fast",
+  "trot backward slowly",
+  "trot forward fast",
+  "trot forward slowly",
+  "trot in place"
+]

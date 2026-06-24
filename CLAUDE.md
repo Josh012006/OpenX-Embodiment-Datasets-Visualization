@@ -4,7 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Purpose
 
-Visualize the **3D spatial distribution of end-effector (EEF) target positions** across all robot datasets in the [Open X-Embodiment collection](https://robotics-transformer-x.github.io/) (DeepMind). The goal is to show what region of space each robot was trained to operate in, relative to its base.
+Visualize, in two complementary ways, the robot training data from the [Open X-Embodiment collection](https://robotics-transformer-x.github.io/) (DeepMind):
+
+1. **EEF endpoint positions** — 3D spatial distribution of end-effector positions at the last step of each training episode, in the robot's world frame (base at origin).
+2. **Task description embeddings** — semantic clustering of natural-language task instructions via sentence embeddings (all-mpnet-base-v2) + UMAP 3D projection.
 
 ## Running the Notebook
 
@@ -13,39 +16,74 @@ This is a **Google Colab-first project** — all development happens in [colabs/
 To run locally (requires Python 3.10; 3.11 triggers a known recursion issue with `tfds.load`):
 
 ```bash
-pip install tensorflow tensorflow-datasets plotly ipywidgets Pillow numpy gcsfs
+pip install tensorflow tensorflow-datasets plotly ipywidgets Pillow numpy gcsfs sentence-transformers umap-learn
 jupyter notebook colabs/Open_X_Embodiment_Datasets.ipynb
 ```
 
-For cloud execution, use the Colab badge in the notebook header. Dataset specs are streamed from `gs://gresearch/robotics/` (metadata only); endpoint caches are loaded from the cloned repo.
+For cloud execution, use the Colab badge in the notebook header. Both caches (`endpoints_cache_random/` and `task_description_cache/`) are loaded from the cloned repo.
 
 ## Architecture
 
-The single notebook is organized into two sections:
+The notebook has **39 cells** (cell-0 to cell-38), organized into three sections.
 
-1. **Datasets Infos** (cell-6) — identifies the EEF position field for each dataset, defines `DATASET_EEF_CONFIG` and `DATASET_ROBOT_INFO`.
-2. **Visualize End Effector Positions** (cell-14) — cache generation, helpers, and interactive Plotly visualizations (individual and combined).
+### Section 1 — Datasets Infos (cells 6–14)
 
-### Data model
+| Cell | Role |
+|---|---|
+| cell-7 | `%pip install` all dependencies |
+| cell-8 | Imports + `DATASETS` list (53 datasets) |
+| cell-9 | `DATASET_ROBOT_INFO` — robot + gripper for **all 53** datasets |
+| cell-10 | Utils: `dataset2path`, `extract_endpoint`, `get_safe_split`, `normalize` |
+| cell-12 | Feature exploration loop — prints `b.info.features` for each dataset |
+| cell-13 | `DATASET_EEF_CONFIG` — EEF extraction config for 33 datasets |
+| cell-14 | Markdown listing the 20 excluded datasets and their reasons |
+
+### Section 2 — Visualize EEF Positions (cells 15–24)
+
+| Cell | Role |
+|---|---|
+| cell-17 | Extra imports (`gc`, `tf`, `subprocess`) |
+| cell-18 | Clone repo + set `CACHE_DIR = ".../endpoints_cache_random"` |
+| cell-19 | `load_dataset` — cache generation (random sampling, last step) |
+| cell-20 | `OPENVLA_DATASETS`, `COLORS`, all visualization helpers, `build_figure` |
+| cell-22 | Individual EEF visualization widget |
+| cell-24 | Combined EEF visualization widget |
+
+### Section 3 — Task Description Embeddings (cells 25–38)
+
+| Cell | Role |
+|---|---|
+| cell-26 | `%pip install sentence-transformers umap-learn` |
+| cell-28 | Feature inspection loop — checks which datasets have `language_instruction` |
+| cell-29 | `TASK_FIELD_CONFIG`, `TASK_SKIP_DATASETS`, `get_instruction_field` |
+| cell-32 | Clone repo + set `TASK_CACHE_DIR = ".../task_description_cache"` |
+| cell-33 | `extract_unique_task_descriptions` — builds per-dataset JSON caches |
+| cell-34 | `EMBED_MODEL`, `compute_all_embeddings_3d`, `build_task_figure`, helpers |
+| cell-36 | Individual task embedding visualization |
+| cell-38 | Combined task embedding visualization |
+
+---
+
+## Data model
 
 All datasets follow the **RLDS** spec:
 
 ```
-dataset  →  episodes  →  steps  →  { observation, action, reward, … }
+dataset  ->  episodes  ->  steps  ->  { observation, action, reward, ... }
 ```
 
-EEF position is stored under different fields per dataset. The notebook handles three extraction strategies:
+---
 
-| Strategy | Config | Use case |
-|---|---|---|
-| Direct | `indices=None, reshape=False` | Field is already a 3D `[x, y, z]` vector |
-| Slice | `indices=slice(i,j), reshape=False` | `[x, y, z]` lives at specific offsets in a larger state vector |
-| Reshape (row) | `reshape=True` (default) | 16 values → 4×4 matrix, returns `matrix[3, :3]` (last row) |
-| Reshape (col) | `reshape=True, reshape_convention="col"` | 16 values → 4×4 matrix, returns `matrix[:3, 3]` (translation column) |
+## Key data structures
 
-### Key data structures
+### `DATASET_ROBOT_INFO` (cell-9)
 
-**`DATASET_EEF_CONFIG`** (cell-12) — source of truth for field paths and extraction strategy:
+Robot platform and gripper type for **all 53 datasets** in `DATASETS`. Used by `get_dataset_label()` to annotate figures. Note: `DATASET_EEF_CONFIG` covers only 33 of these — the other 20 have no usable EEF position field.
+
+### `DATASET_EEF_CONFIG` (cell-13)
+
+Source of truth for EEF field paths and extraction strategy (33 datasets):
+
 ```python
 {
     "dataset_name": {
@@ -59,38 +97,46 @@ EEF position is stored under different fields per dataset. The notebook handles 
 ```
 
 Most datasets use `step["observation"][field_name]`, but two exceptions exist:
-- `asu_table_top_converted_externally_to_rlds`: `field: ["ground_truth_states", "EE"]` — top-level step key, not inside observation
+- `asu_table_top_converted_externally_to_rlds`: `field: ["ground_truth_states", "EE"]` — top-level step key
 - `iamlab_cmu_pickup_insert_converted_externally_to_rlds`: `field: ["action"]` — reads from the action vector directly
 
-**`DATASET_ROBOT_INFO`** (cell-13) — robot platform and gripper type per dataset. Covers the same 33 datasets as `DATASET_EEF_CONFIG`.
+Extraction strategies:
 
-**`OPENVLA_DATASETS`** (cell-19) — set of 15 datasets used in OpenVLA training; tagged `✅ OpenVLA` in visualizations. All others are tagged `🔵 OOD`.
+| Strategy | Config | Use case |
+|---|---|---|
+| Direct | `indices=None, reshape=False` | Field is already a 3D `[x, y, z]` vector |
+| Slice | `indices=slice(i,j), reshape=False` | `[x, y, z]` lives at specific offsets in a larger state vector |
+| Reshape (row) | `reshape=True` (default) | 16 values -> 4x4 matrix, returns `matrix[3, :3]` (last row) |
+| Reshape (col) | `reshape=True, reshape_convention="col"` | 16 values -> 4x4 matrix, returns `matrix[:3, 3]` (translation column) |
 
-### Cache workflow
+### `OPENVLA_DATASETS` (cell-20)
 
-The cache stores **one point per episode** — the EEF position at the **last step** of each episode. Arrays are saved as `endpoints_cache/<dataset_name>.npy` (shape `(n_episodes, 3)`).
+Set of 15 datasets used in OpenVLA training. Tagged `✅ OpenVLA` in all visualizations; all others tagged `🔵 OOD`.
 
-The `load_dataset` function (cell-18) generates missing cache files:
-1. Skips datasets already on disk
-2. Loads up to 500 episodes via `get_safe_split(b, max_episodes=500)`
-3. Iterates through steps to find the last one, calls `extract_endpoint`
-4. Saves the collected `(n, 3)` array as `.npy`
-5. Calls `gc.collect()` and `tf.keras.backend.clear_session()` between datasets
+### `TASK_FIELD_CONFIG` (cell-29)
 
-The notebook clones the repo inside Colab at `/content/OpenX-Embodiment-Datasets-Visualization/` and reads from `endpoints_cache/` via `get_endpoints(dataset_name)`.
+Per-dataset override for the instruction field. Most datasets expose `language_instruction` directly under `steps`. Exceptions (stored under `observation.natural_language_instruction`): `fractal20220817_data`, `kuka`, `bridge`, `taco_play`, `jaco_play`, `berkeley_cable_routing`, `roboturk`, `nyu_door_opening_surprising_effectiveness`, `viola`, `berkeley_autolab_ur5`, `toto`, `columbia_cairlab_pusht_real`, `bc_z`.
 
-### Key APIs / libraries
+### `TASK_SKIP_DATASETS` (cell-29)
 
-| Library | Role |
-|---|---|
-| `tensorflow_datasets` (tfds) | Read dataset specs from GCS via `builder_from_directory` |
-| `tensorflow` / `gc` | Memory management during cache generation |
-| `plotly` | Interactive 3D and 2D scatter plots |
-| `ipywidgets` | Checkbox / radio controls in Colab |
-| `numpy` | Endpoint array storage (`.npy`) and normalization |
-| `subprocess` / `os` | Clone repo and locate cache inside Colab |
+Datasets excluded from the task description section:
+- `language_table` — instruction encoded as int32 bytes, not a plain string
+- `bridge`, `robo_net` — OOM during full-dataset extraction
+- `uiuc_d3field` — `language_instruction` always empty
 
-### `extract_endpoint` logic (cell-9)
+---
+
+## Cache directories
+
+| Directory | Format | Contents |
+|---|---|---|
+| `endpoints_cache_random/` | `<name>.npy` shape `(n, 3)` | EEF position at last step per episode; randomly sampled episodes |
+| `task_description_cache/` | `<name>.json` list of strings | Unique task descriptions per dataset |
+| `task_description_cache/_umap_3d_cache.json` | JSON dict with `dataset`, `description`, `x`, `y`, `z` lists | Shared 3D UMAP projection across all datasets |
+
+---
+
+## `extract_endpoint` logic (cell-10)
 
 ```python
 def extract_endpoint(step, config):
@@ -117,23 +163,54 @@ def extract_endpoint(step, config):
         return data
 ```
 
-**Important invariant**: index slicing is always applied before reshape. When adding new datasets with `reshape=True`, set `indices` to the exact sub-range of the state vector containing the 16 matrix values, and set `reshape_convention` to `"col"` if the data uses a standard homogeneous matrix layout.
+**Important invariant**: index slicing is always applied before reshape. When adding new datasets with `reshape=True`, set `indices` to the exact sub-range containing the 16 matrix values, and set `reshape_convention="col"` if the data uses a standard homogeneous matrix layout.
 
-### Visualization helpers (cell-19)
+---
 
-**`make_base_marker_3d(scale=0.1)`** — returns a list of Plotly traces representing the robot base:
-- Three colored line segments from origin: X axis (red), Y axis (green), Z axis (blue)
+## `load_dataset` — EEF cache generation (cell-19)
+
+1. Skip if `endpoints_cache_random/<name>.npy` already exists
+2. Load up to 500 episodes via `get_safe_split(b, max_episodes=500)`
+3. Use **random sampling**: `shuffle_files=True`, `.shuffle(buffer_size=50, seed=42)`, `.take(n)` — NOT sequential slicing
+4. Iterate steps to find the last one, call `extract_endpoint`
+5. Save collected array as `.npy`
+6. Call `gc.collect()` and `tf.keras.backend.clear_session()` after each dataset
+
+---
+
+## `compute_all_embeddings_3d` — UMAP cache generation (cell-34)
+
+1. Load all per-dataset JSON caches from `task_description_cache/`
+2. Concatenate all descriptions with their dataset labels
+3. Encode with `SentenceTransformer('all-mpnet-base-v2')` → `(N, 768)` embeddings
+4. Fit `umap.UMAP(n_components=3, n_neighbors=30, min_dist=0.05, random_state=42)` on the **full combined set** — fitting per-dataset would make inter-dataset distances meaningless
+5. Cache result to `task_description_cache/_umap_3d_cache.json`
+
+---
+
+## Visualization helpers (cell-20)
+
+**`make_base_marker_3d(scale=0.1)`** — list of Plotly traces for the robot base:
+- Three colored line segments from origin: X=red, Y=green, Z=blue
 - One marker+text trace at (0, 0, 0) labelled "Base"
 
-**`build_figure(endpoints, dataset_name, view, normalize_flag, color)`** — creates the full Plotly figure for a single dataset. `view` is one of `'3D'`, `'XY'`, `'XZ'`, `'YZ'`. Title includes `n=<episode_count>`.
+**`make_base_marker_2d()`** — single cross marker at origin for 2D projections.
 
-**`normalize(endpoints)`** — min-max normalization per axis, clamps range to 1 if an axis has zero variance.
+**`build_figure(endpoints, dataset_name, view, normalize_flag, color)`** — full Plotly figure for a single EEF dataset. `view` is one of `'3D'`, `'XY'`, `'XZ'`, `'YZ'`.
 
-### Adding a new dataset
+**`build_task_figure(points, dataset_name, color)`** — full Plotly figure for a single dataset's UMAP task points, with hover text.
 
-1. Run the feature exploration cell (cell-11) to find the field that holds the EEF position.
-2. Add an entry to `DATASET_EEF_CONFIG` (cell-12) with the correct `field`, `indices`, `reshape`, and optionally `reshape_convention`.
-3. Add an entry to `DATASET_ROBOT_INFO` (cell-13) with the robot name and gripper type.
-4. Run the cache generation cell (cell-18) — it will detect the missing `.npy` and generate it automatically.
-5. Commit the new `endpoints_cache/<dataset_name>.npy` file.
-6. If the dataset is in OpenVLA training data, add it to `OPENVLA_DATASETS` (cell-19).
+**`normalize(endpoints)`** — min-max normalization per axis, clamps range to 1 if zero variance.
+
+**`get_dataset_label(dataset_name)`** — returns `(robot_name, tag)` where tag is `"✅ OpenVLA"` or `"🔵 OOD"`.
+
+---
+
+## Adding a new EEF dataset
+
+1. Run the feature exploration cell (cell-12) to find the field that holds the EEF position.
+2. Add an entry to `DATASET_EEF_CONFIG` (cell-13) with `field`, `indices`, `reshape`, and optionally `reshape_convention`.
+3. Add an entry to `DATASET_ROBOT_INFO` (cell-9) with robot name and gripper type.
+4. Run the cache generation cell (cell-19) — it detects the missing `.npy` and generates it automatically.
+5. Commit `endpoints_cache_random/<dataset_name>.npy`.
+6. If the dataset is in OpenVLA training data, add it to `OPENVLA_DATASETS` (cell-20).
